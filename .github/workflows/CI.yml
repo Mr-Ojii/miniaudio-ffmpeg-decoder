@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          git clone https://github.com/FFmpeg/FFmpeg.git --depth 1
+          cd FFmpeg
+          ./configure --disable-autodetect --disable-debug --disable-doc --disable-all --disable-x86asm --enable-avcodec --enable-avformat --enable-swscale --enable-swresample --prefix=${{ github.workspace }}/libraries
+          make -j$(nproc)
+          make install -j$(nproc)
+
+      - name: Clone miniaudio
+        run: git clone https://github.com/mackron/miniaudio.git --depth 1
+
+      - name: ls pkgconfig path
+        run: ls ${{ github.workspace }}/libraries/lib/pkgconfig
+
+      - name: Build
+        run: |
+          export PKG_CONFIG_PATH=${{ github.workspace }}/libraries/lib/pkgconfig
+          gcc -Wall -Wextra -I${{ github.workspace }}/miniaudio $(pkg-config libavformat libavcodec libavutil libswresample --cflags) -o example example.c $(pkg-config libavformat libavcodec libavutil libswresample --libs)
