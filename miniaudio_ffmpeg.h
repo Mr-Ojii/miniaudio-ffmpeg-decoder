@@ -92,8 +92,10 @@ typedef struct
     ma_seek_proc onSeek;
     ma_tell_proc onTell;
     void* pReadSeekTellUserData;
-    // f32 only
+    ma_format format;
 #if !defined(MA_NO_FFMPEG)
+    uint8_t bitsPerSample;
+    enum AVSampleFormat avFormat;
     AVFormatContext* formatCtx;
     AVCodecContext* codecCtx;
     AVStream* stream;
@@ -341,7 +343,7 @@ static ma_result decode_one_cycle(ma_ffmpeg* pFFmpeg) {
             if (pFFmpeg->frame->pts != AV_NOPTS_VALUE)
                 pFFmpeg->cursor = (pFFmpeg->frame->pts * pFFmpeg->codecCtx->sample_rate * pFFmpeg->stream->time_base.num) / pFFmpeg->stream->time_base.den;
             pFFmpeg->cursor += pFFmpeg->frame->nb_samples;
-            if (pFFmpeg->frame->format != AV_SAMPLE_FMT_FLT) {
+            if (pFFmpeg->frame->format != pFFmpeg->avFormat) {
                 if (pFFmpeg->swrCtx == NULL) {
                     pFFmpeg->swrCtx = swr_alloc();
                     if (pFFmpeg->swrCtx == NULL)
@@ -351,11 +353,11 @@ static ma_result decode_one_cycle(ma_ffmpeg* pFFmpeg) {
                     av_opt_set_int(pFFmpeg->swrCtx, "in_sample_rate", pFFmpeg->frame->sample_rate, 0);
                     av_opt_set_int(pFFmpeg->swrCtx, "out_sample_rate", pFFmpeg->frame->sample_rate, 0);
                     av_opt_set_sample_fmt(pFFmpeg->swrCtx, "in_sample_fmt", (enum AVSampleFormat)pFFmpeg->frame->format, 0);
-                    av_opt_set_sample_fmt(pFFmpeg->swrCtx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
+                    av_opt_set_sample_fmt(pFFmpeg->swrCtx, "out_sample_fmt", pFFmpeg->avFormat, 0);
                     if (swr_init(pFFmpeg->swrCtx) < 0) {
                         return MA_ERROR;
                     }
-                    int swr_buf_len =  av_samples_get_buffer_size(NULL, pFFmpeg->frame->ch_layout.nb_channels, pFFmpeg->frame->sample_rate, AV_SAMPLE_FMT_FLT, 1);
+                    int swr_buf_len =  av_samples_get_buffer_size(NULL, pFFmpeg->frame->ch_layout.nb_channels, pFFmpeg->frame->sample_rate, pFFmpeg->avFormat, 1);
                     pFFmpeg->swrBuf = (uint8_t*)av_malloc(swr_buf_len);
                 }
 
@@ -363,10 +365,10 @@ static ma_result decode_one_cycle(ma_ffmpeg* pFFmpeg) {
                                     (const uint8_t* const*)pFFmpeg->frame->extended_data, pFFmpeg->frame->nb_samples) < 0) {
                     return MA_ERROR;
                 }
-                size_t count = pFFmpeg->frame->nb_samples * 4 * pFFmpeg->frame->ch_layout.nb_channels;
+                size_t count = pFFmpeg->frame->nb_samples * pFFmpeg->bitsPerSample * pFFmpeg->frame->ch_layout.nb_channels;
                 ma_ffmpeg_queue_enqueue(&pFFmpeg->queue, pFFmpeg->swrBuf, count);
             } else {
-                size_t count = pFFmpeg->frame->nb_samples * 4 * pFFmpeg->frame->ch_layout.nb_channels;
+                size_t count = pFFmpeg->frame->nb_samples * pFFmpeg->bitsPerSample * pFFmpeg->frame->ch_layout.nb_channels;
                 ma_ffmpeg_queue_enqueue(&pFFmpeg->queue, pFFmpeg->frame->extended_data[0], count);
             }
         }
@@ -377,7 +379,7 @@ static ma_result decode_one_cycle(ma_ffmpeg* pFFmpeg) {
 
 #endif // !MA_NO_FFMPEG
 
-static ma_result ma_ffmpeg_init_internal(ma_ffmpeg* pFFmpeg) {
+static ma_result ma_ffmpeg_init_internal(const ma_decoding_backend_config *pConfig, ma_ffmpeg* pFFmpeg) {
     ma_result result;
     ma_data_source_config dataSourceConfig;
 
@@ -386,6 +388,36 @@ static ma_result ma_ffmpeg_init_internal(ma_ffmpeg* pFFmpeg) {
     }
 
     MA_ZERO_OBJECT(pFFmpeg);
+    pFFmpeg->format = ma_format_f32;
+
+    #if !defined(MA_NO_FFMPEG)
+    {
+        pFFmpeg->avFormat = AV_SAMPLE_FMT_FLT;
+        pFFmpeg->bitsPerSample = 4;
+
+        if (pConfig != NULL) {
+            switch(pConfig->preferredFormat) {
+                case ma_format_u8:
+                    pFFmpeg->format = ma_format_u8;
+                    pFFmpeg->avFormat = AV_SAMPLE_FMT_U8;
+                    pFFmpeg->bitsPerSample = 1;
+                    break;
+                case ma_format_s16:
+                    pFFmpeg->format = ma_format_s16;
+                    pFFmpeg->avFormat = AV_SAMPLE_FMT_S16;
+                    pFFmpeg->bitsPerSample = 2;
+                    break;
+                case ma_format_s32:
+                    pFFmpeg->format = ma_format_s32;
+                    pFFmpeg->avFormat = AV_SAMPLE_FMT_S32;
+                    pFFmpeg->bitsPerSample = 4;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    #endif
 
     dataSourceConfig = ma_data_source_config_init();
     dataSourceConfig.vtable = &g_ma_ffmpeg_ds_vtable;
@@ -405,7 +437,7 @@ MA_API ma_result ma_ffmpeg_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_tel
     (void)pAllocationCallbacks;
     (void)pConfig;
 
-    result = ma_ffmpeg_init_internal(pFFmpeg);
+    result = ma_ffmpeg_init_internal(pConfig, pFFmpeg);
     if (result != MA_SUCCESS) {
         return result;
     }
@@ -539,7 +571,7 @@ MA_API ma_result ma_ffmpeg_read_pcm_frames(ma_ffmpeg *pFFmpeg, void *pFramesOut,
 
     #if !defined(MA_NO_FFMPEG)
     {
-        size_t bytesCount = frameCount * 4 * pFFmpeg->codecCtx->ch_layout.nb_channels;
+        size_t bytesCount = frameCount * pFFmpeg->bitsPerSample * pFFmpeg->codecCtx->ch_layout.nb_channels;
         ma_result ret;
         while (pFFmpeg->queue.size < bytesCount) {
             ret = decode_one_cycle(pFFmpeg);
@@ -551,7 +583,7 @@ MA_API ma_result ma_ffmpeg_read_pcm_frames(ma_ffmpeg *pFFmpeg, void *pFramesOut,
 
         size_t readBytes;
         ma_ffmpeg_queue_read(&pFFmpeg->queue, pFramesOut, bytesCount, &readBytes);
-        *pFramesRead = readBytes / 4 / pFFmpeg->codecCtx->ch_layout.nb_channels;
+        *pFramesRead = readBytes / pFFmpeg->bitsPerSample / pFFmpeg->codecCtx->ch_layout.nb_channels;
 
         return ret;
     }
@@ -616,7 +648,7 @@ MA_API ma_result ma_ffmpeg_seek_to_pcm_frame(ma_ffmpeg *pFFmpeg, ma_uint64 frame
         {
             decode_one_cycle(pFFmpeg);
         } while(pFFmpeg->cursor < frameIndex);
-        int popBytes = (frameIndex - (pFFmpeg->cursor - (pFFmpeg->queue.size / 4 / pFFmpeg->codecCtx->ch_layout.nb_channels))) * 4 * pFFmpeg->codecCtx->ch_layout.nb_channels;
+        int popBytes = (frameIndex - (pFFmpeg->cursor - (pFFmpeg->queue.size / pFFmpeg->bitsPerSample / pFFmpeg->codecCtx->ch_layout.nb_channels))) * pFFmpeg->bitsPerSample * pFFmpeg->codecCtx->ch_layout.nb_channels;
         ma_ffmpeg_queue_read(&pFFmpeg->queue, NULL, popBytes, NULL);
 
         return MA_SUCCESS;
@@ -653,7 +685,7 @@ MA_API ma_result ma_ffmpeg_get_data_format(ma_ffmpeg *pFFmpeg, ma_format *pForma
     }
 
     if (pFormat) {
-        *pFormat = ma_format_f32;
+        *pFormat = pFFmpeg->format;
     }
 
     #if !defined(MA_NO_FFMPEG)
@@ -700,7 +732,7 @@ MA_API ma_result ma_ffmpeg_get_cursor_in_pcm_frames(ma_ffmpeg* pFFmpeg, ma_uint6
         }
 
         // queueに積んである分だけcursorがズレてる
-        *pCursor = pFFmpeg->cursor - (pFFmpeg->queue.size / 4 / pFFmpeg->codecCtx->ch_layout.nb_channels);
+        *pCursor = pFFmpeg->cursor - (pFFmpeg->queue.size / pFFmpeg->bitsPerSample / pFFmpeg->codecCtx->ch_layout.nb_channels);
 
         return MA_SUCCESS;
     }
