@@ -614,7 +614,7 @@ MA_API ma_result ma_ffmpeg_seek_to_pcm_frame(ma_ffmpeg *pFFmpeg, ma_uint64 frame
         if (!pFFmpeg->formatCtx || !pFFmpeg->codecCtx || !pFFmpeg->stream || length < frameIndex) {
             return MA_INVALID_ARGS;
         }
-        AVRational avr { 1, pFFmpeg->codecCtx->sample_rate };
+        AVRational avr = { 1, pFFmpeg->codecCtx->sample_rate };
         int64_t timestamp = av_rescale_q(frameIndex, avr, pFFmpeg->stream->time_base);
         if (av_seek_frame(pFFmpeg->formatCtx, pFFmpeg->stream->index, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
             return MA_ERROR;
